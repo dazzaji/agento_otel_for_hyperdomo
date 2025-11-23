@@ -14,6 +14,7 @@ import openai
 from tqdm import tqdm
 import os
 from dotenv import load_dotenv
+import csv
 import json
 import sys
 import subprocess  # Added for tee'd logging
@@ -38,11 +39,16 @@ from opentelemetry import propagate, trace
 from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import TracerProvider
-from opentelemetry.sdk.trace.export import BatchSpanProcessor
+from opentelemetry.sdk.trace.export import BatchSpanProcessor, SimpleSpanProcessor
 from opentelemetry.trace import SpanKind, Status, StatusCode
 from openinference.semconv.trace import OpenInferenceSpanKindValues as OIKind
 
+from otel_file_exporter import FileSpanExporter
+
 MODULE_NAME = Path(__file__).stem
+TS_STAMP = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+FILE_EXPORT_PATH = Path("data") / f"{MODULE_NAME}_otel_{TS_STAMP}.ndjson"
+Path("data").mkdir(exist_ok=True)
 resource = Resource.create(
     {
         "service.name": "agento",
@@ -62,6 +68,7 @@ provider.add_span_processor(
         max_export_batch_size=512,
     )
 )
+provider.add_span_processor(SimpleSpanProcessor(FileSpanExporter(str(FILE_EXPORT_PATH))))
 trace.set_tracer_provider(provider)
 tracer = trace.get_tracer(__name__)
 
@@ -477,6 +484,19 @@ def save_plan_outputs(plan: ProjectPlan):
     save_file(md_content, md_filename)
 
 # ---------------------------------------------------------------------------
+#  Lake Merritt CSV Helper
+# ---------------------------------------------------------------------------
+def save_plan_csv(goal: str, plan: Dict) -> None:
+    ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    csv_path = Path("data") / f"{MODULE_NAME}_plan_{ts}.csv"
+    csv_path.parent.mkdir(parents=True, exist_ok=True)
+    with csv_path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(["input", "output", "expected_output"])
+        writer.writerow([goal, json.dumps(plan, ensure_ascii=False), "expected output goes here"])
+    logging.info("Saved Lake Merritt CSV to %s", csv_path)
+
+# ---------------------------------------------------------------------------
 #  Context Propagation Helpers
 # ---------------------------------------------------------------------------
 def read_trace_context():
@@ -551,7 +571,25 @@ if __name__ == "__main__":
             print(json.dumps(final_plan.model_dump(), indent=2))
             flush()
 
+            # Emit a holistic pre-revision span for Lake Merritt comparisons
+            with tracer.start_as_current_span(
+                "agento.event.holistic_review_pre",
+                kind=SpanKind.INTERNAL,
+                attributes={
+                    "openinference.span.kind": OIKind.EVALUATOR.value,
+                    "agento.step_type": "holistic_review_pre",
+                    "agento.user_goal": original_goal,
+                    "agento.final_plan_content": json.dumps(final_plan.model_dump(), ensure_ascii=False),
+                    "gen_ai.response.content": json.dumps(final_plan.model_dump(), ensure_ascii=False),
+                },
+            ):
+                pass
+
             save_plan_outputs(final_plan)
+            try:
+                save_plan_csv(original_goal, final_plan.model_dump())
+            except Exception as csv_err:
+                logging.error("Failed to save Lake Merritt CSV: %s", csv_err)
 
             print(f"\nProject plan saved.")
             print("You can now run the next module to continue the iterative refinement process.")

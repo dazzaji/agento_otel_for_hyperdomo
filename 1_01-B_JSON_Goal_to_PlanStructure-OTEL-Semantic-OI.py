@@ -104,6 +104,7 @@ python 1_01-B_JSON_Goal_to_PlanStructure-OTEL-Semantic-OI.py
 # ---------------------------------------------------------------------------
 #  Standard Imports
 # ---------------------------------------------------------------------------
+import csv
 import json
 import logging
 import os
@@ -128,11 +129,16 @@ from opentelemetry import propagate, trace
 from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import TracerProvider
-from opentelemetry.sdk.trace.export import BatchSpanProcessor
+from opentelemetry.sdk.trace.export import BatchSpanProcessor, SimpleSpanProcessor
 from opentelemetry.trace import SpanKind, Status, StatusCode
 from openinference.semconv.trace import OpenInferenceSpanKindValues as OIKind
 
+from otel_file_exporter import FileSpanExporter
+
 MODULE_NAME = Path(__file__).stem
+TS_STAMP = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+FILE_EXPORT_PATH = Path("data") / f"{MODULE_NAME}_otel_{TS_STAMP}.ndjson"
+
 resource = Resource.create(
     {
         "service.name": "agento",
@@ -152,6 +158,7 @@ provider.add_span_processor(
         max_export_batch_size=512,
     )
 )
+provider.add_span_processor(SimpleSpanProcessor(FileSpanExporter(str(FILE_EXPORT_PATH))))
 trace.set_tracer_provider(provider)
 tracer = trace.get_tracer(__name__)
 
@@ -326,6 +333,19 @@ def save_plan_structure(plan: Dict, base_filename: str = "plan_structure") -> bo
         return False
 
 # ---------------------------------------------------------------------------
+#  Lake Merritt CSV Helper
+# ---------------------------------------------------------------------------
+def save_plan_csv(goal: str, plan: Dict) -> None:
+    ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    csv_path = Path("data") / f"{MODULE_NAME}_plan_{ts}.csv"
+    csv_path.parent.mkdir(parents=True, exist_ok=True)
+    with csv_path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(["input", "output", "expected_output"])
+        writer.writerow([goal, json.dumps(plan, ensure_ascii=False), "expected output goes here"])
+    logging.info("Saved Lake Merritt CSV to %s", csv_path)
+
+# ---------------------------------------------------------------------------
 #  Main Execution
 # ---------------------------------------------------------------------------
 def main() -> None:
@@ -372,6 +392,11 @@ def main() -> None:
                 print("\nPlan structure successfully saved!")
             else:
                 print("\nError: Failed to save plan structure.")
+
+            try:
+                save_plan_csv(project_goal, plan)
+            except Exception as csv_err:
+                logging.error("Failed to save Lake Merritt CSV: %s", csv_err)
 
             carrier = {}
             propagate.inject(carrier)

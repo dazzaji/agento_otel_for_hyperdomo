@@ -1,5 +1,6 @@
 # RUN:  python3 2_Revise-Plan-Stable-OTEL.py
 
+import csv
 import json
 import os
 from dotenv import load_dotenv
@@ -25,9 +26,11 @@ from opentelemetry import propagate, trace
 from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import TracerProvider
-from opentelemetry.sdk.trace.export import BatchSpanProcessor
+from opentelemetry.sdk.trace.export import BatchSpanProcessor, SimpleSpanProcessor
 from opentelemetry.trace import SpanKind, Status, StatusCode
 from openinference.semconv.trace import OpenInferenceSpanKindValues as OIKind
+
+from otel_file_exporter import FileSpanExporter
 ### MODIFICATION END ###
 
 @contextlib.contextmanager
@@ -87,6 +90,9 @@ genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
 ### MODIFICATION START ###
 # Added OTEL tracer setup
 MODULE_NAME = Path(__file__).stem
+TS_STAMP = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+FILE_EXPORT_PATH = Path("data") / f"{MODULE_NAME}_otel_{TS_STAMP}.ndjson"
+Path("data").mkdir(exist_ok=True)
 resource = Resource.create({
     "service.name": "agento",
     "service.version": "1.0.0",
@@ -99,6 +105,7 @@ provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter(
     endpoint=os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4317"),
     insecure=True,
 )))
+provider.add_span_processor(SimpleSpanProcessor(FileSpanExporter(str(FILE_EXPORT_PATH))))
 trace.set_tracer_provider(provider)
 tracer = trace.get_tracer(__name__)
 
@@ -390,6 +397,19 @@ def save_revised_plan(plan: Dict, file_prefix: str) -> None:
         f.write(md_content)
     print(f"Revised plan saved as '{md_filename}'")
 
+# ---------------------------------------------------------------------------
+#  Lake Merritt CSV Helper
+# ---------------------------------------------------------------------------
+def save_plan_csv(goal: str, plan: Dict) -> None:
+    ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    csv_path = Path("data") / f"{MODULE_NAME}_plan_{ts}.csv"
+    csv_path.parent.mkdir(parents=True, exist_ok=True)
+    with csv_path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(["input", "output", "expected_output"])
+        writer.writerow([goal, json.dumps(plan, ensure_ascii=False), "expected output goes here"])
+    print(f"Lake Merritt CSV saved as '{csv_path}'")
+
 ### MODIFICATION START ###
 # Added context propagation helpers, necessary for multi-module traces
 def read_trace_context():
@@ -455,9 +475,18 @@ if __name__ == "__main__":
                                 final_span.set_attribute("agento.step_type", "holistic_review")
                                 final_span.set_attribute("agento.user_goal", user_goal)
                                 final_span.set_attribute("agento.final_plan_content", final_plan_json)
+                                final_span.set_attribute("gen_ai.response.content", final_plan_json)
                             ### MODIFICATION END ###
                             file_prefix = f"{notebook_name}-{current_datetime}"
                             save_revised_plan(further_revised_plan, file_prefix)
+                            try:
+                                save_plan_csv(user_goal, further_revised_plan)
+                            except Exception as csv_err:
+                                print(f"Failed to save Lake Merritt CSV: {csv_err}")
+                            try:
+                                save_plan_csv(user_goal, further_revised_plan)
+                            except Exception as csv_err:
+                                print(f"Failed to save Lake Merritt CSV: {csv_err}")
                         else:
                             print("Error: Revision process failed")
                             root_span.set_status(Status(StatusCode.ERROR, "Revision process failed"))
