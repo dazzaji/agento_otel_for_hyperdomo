@@ -92,6 +92,7 @@ genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
 MODULE_NAME = Path(__file__).stem
 TS_STAMP = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 FILE_EXPORT_PATH = Path("data") / f"{MODULE_NAME}_otel_{TS_STAMP}.ndjson"
+OFFLINE_MODE = os.getenv("AGENTO_OFFLINE", "false").lower() == "true"
 Path("data").mkdir(exist_ok=True)
 resource = Resource.create({
     "service.name": "agento",
@@ -101,10 +102,11 @@ resource = Resource.create({
     "service.instance.id": str(uuid.uuid4()),
 })
 provider = TracerProvider(resource=resource)
-provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter(
-    endpoint=os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4317"),
-    insecure=True,
-)))
+if not OFFLINE_MODE:
+    provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter(
+        endpoint=os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4317"),
+        insecure=True,
+    )))
 provider.add_span_processor(SimpleSpanProcessor(FileSpanExporter(str(FILE_EXPORT_PATH))))
 trace.set_tracer_provider(provider)
 tracer = trace.get_tracer(__name__)
@@ -335,12 +337,17 @@ def revise_step_with_llms(plan: Dict, step: Dict, revision_request: str, anthrop
         return plan, context
 
 def further_revise_plan(plan: Dict, anthropic_client: anthropic.Anthropic, gemini_model: genai.GenerativeModel, verbose: bool = True) -> Tuple[Optional[Dict], Dict[str, RevisionContext]]:
+    offline_mode = os.getenv("AGENTO_OFFLINE", "false").lower() == "true"
     try:
         print("Initializing revision process...")
         revision_contexts = {}
         steps_to_revise = [step for step in plan["Detailed_Outline"] if step["name"] in plan.get("revision_requests", {})]
         total_steps = len(steps_to_revise)
         print(f"Found {total_steps} steps to revise")
+
+        if offline_mode:
+            print("Offline mode enabled: skipping network LLM revisions; copying plan forward.")
+            return plan, revision_contexts
 
         for i, step in enumerate(steps_to_revise):
             step_name = step["name"]
@@ -431,7 +438,8 @@ def write_trace_context():
 ### MODIFICATION END ###
 
 if __name__ == "__main__":
-    with tee_output():
+    tee_ctx = tee_output() if not OFFLINE_MODE else contextlib.nullcontext()
+    with tee_ctx:
         ### MODIFICATION START ###
         parent_context = read_trace_context()
         with tracer.start_as_current_span(
@@ -509,3 +517,4 @@ if __name__ == "__main__":
     # Ensure all spans are flushed before exiting
     trace.get_tracer_provider().force_flush()
     ### MODIFICATION END ###
+    os._exit(0)

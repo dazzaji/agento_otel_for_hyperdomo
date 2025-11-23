@@ -61,17 +61,24 @@ class FileSpanExporter(SpanExporter):
                 {"key": k, "value": _encode_attribute_value(v)}
                 for k, v in getattr(s, "attributes", {}).items()
             ]
+            kind = getattr(s, "kind", "")
+            if hasattr(kind, "name"):
+                kind = kind.name
+            status_obj = getattr(s, "status", None)
+            status_code = getattr(status_obj, "status_code", "")
+            if hasattr(status_code, "name"):
+                status_code = status_code.name
             span_dict: Dict[str, Any] = {
                 "traceId": f"{s.context.trace_id:032x}",
                 "spanId": f"{s.context.span_id:016x}",
                 "name": s.name,
-                "kind": getattr(s, "kind", ""),
+                "kind": kind,
                 "startTimeUnixNano": getattr(s, "start_time", 0),
                 "endTimeUnixNano": getattr(s, "end_time", 0),
                 "attributes": attrs,
                 "status": {
-                    "code": getattr(getattr(s, "status", None), "status_code", ""),
-                    "message": getattr(getattr(s, "status", None), "description", ""),
+                    "code": status_code,
+                    "message": getattr(status_obj, "description", ""),
                 },
             }
             if getattr(s, "parent", None) and getattr(s.parent, "span_id", None):

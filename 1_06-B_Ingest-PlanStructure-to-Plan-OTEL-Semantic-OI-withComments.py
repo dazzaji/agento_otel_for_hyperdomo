@@ -48,6 +48,7 @@ from otel_file_exporter import FileSpanExporter
 MODULE_NAME = Path(__file__).stem
 TS_STAMP = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 FILE_EXPORT_PATH = Path("data") / f"{MODULE_NAME}_otel_{TS_STAMP}.ndjson"
+OFFLINE_MODE = os.getenv("AGENTO_OFFLINE", "false").lower() == "true"
 Path("data").mkdir(exist_ok=True)
 resource = Resource.create(
     {
@@ -59,15 +60,16 @@ resource = Resource.create(
     }
 )
 provider = TracerProvider(resource=resource)
-provider.add_span_processor(
-    BatchSpanProcessor(
-        OTLPSpanExporter(
-            endpoint=os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4317"),
-            insecure=True,
-        ),
-        max_export_batch_size=512,
+if not OFFLINE_MODE:
+    provider.add_span_processor(
+        BatchSpanProcessor(
+            OTLPSpanExporter(
+                endpoint=os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4317"),
+                insecure=True,
+            ),
+            max_export_batch_size=512,
+        )
     )
-)
 provider.add_span_processor(SimpleSpanProcessor(FileSpanExporter(str(FILE_EXPORT_PATH))))
 trace.set_tracer_provider(provider)
 tracer = trace.get_tracer(__name__)
@@ -216,6 +218,7 @@ def load_plan_structure(filename: str = "plan_structure.json") -> Optional[Dict]
 #  Function to develop drafts (using GPT-4)
 # ---------------------------------------------------------------------------
 def develop_drafts(plan: Optional[Dict], goal: str) -> Dict[str, str]:
+    offline_mode = os.getenv("AGENTO_OFFLINE", "false").lower() == "true"
     """
     For each step in the plan, uses GPT-4 (OpenAI) to generate a full draft deliverable.
     Returns a dictionary mapping step names to draft content.
@@ -252,8 +255,6 @@ def develop_drafts(plan: Optional[Dict], goal: str) -> Dict[str, str]:
                 f"llm.openai.develop_draft.{step.replace(' ', '_')}",
                 kind=SpanKind.CLIENT,
                 attributes={
-                    ### MODIFICATION ###
-                    # Added standardized and custom attributes for rich, evaluatable traces.
                     "openinference.span.kind": OIKind.LLM.value,
                     "gen_ai.system": "openai",
                     "gen_ai.request.model": "gpt-4",
@@ -263,9 +264,14 @@ def develop_drafts(plan: Optional[Dict], goal: str) -> Dict[str, str]:
                     "agento.instructions": prompt,
                     "agento.criteria": criteria,
                     "agento.user_goal": goal,
-                    ### END MODIFICATION ###
                 },
             ) as span:
+                if offline_mode:
+                    draft_content = f"[offline draft] {step}: aligned to goal '{goal}' with criteria '{criteria}'."
+                    drafts[step] = draft_content
+                    set_ai_response_attribute(span, draft_content)
+                    span.set_status(Status(StatusCode.OK))
+                    continue
                 try:
                     response = openai_client.chat.completions.create(
                         model="gpt-4",
@@ -282,7 +288,6 @@ def develop_drafts(plan: Optional[Dict], goal: str) -> Dict[str, str]:
                         print(f"Draft for step '{step}':\n{draft_content}\n")
                         flush()
 
-                    # Introduce a delay to respect rate limits
                     time.sleep(delay_in_seconds)
 
                 except Exception as e:
@@ -290,6 +295,8 @@ def develop_drafts(plan: Optional[Dict], goal: str) -> Dict[str, str]:
                     span.set_status(Status(StatusCode.ERROR, str(e)))
                     logging.error(f"Error calling OpenAI API for step '{step}': {e}")
                     flush()
+                    draft_content = f"[fallback draft after error] {step}: criteria='{criteria}' goal='{goal}'."
+                    drafts[step] = draft_content
     else:
         logging.error("'Detailed_Outline' or 'Evaluation_Criteria' missing in the plan. Cannot generate drafts.")
         flush()
@@ -299,6 +306,7 @@ def develop_drafts(plan: Optional[Dict], goal: str) -> Dict[str, str]:
 #  Function to generate revision requests
 # ---------------------------------------------------------------------------
 def generate_revision_requests(drafts, plan, original_goal):
+    offline_mode = os.getenv("AGENTO_OFFLINE", "false").lower() == "true"
     """
     For each draft, uses GPT-4 to generate revision requests.
     Returns a dictionary mapping step names to revision request content.
@@ -341,8 +349,6 @@ YOUR INSTRUCTION: Given all this information, now write specific suggestions for
             f"llm.openai.generate_revision_request.{step.replace(' ', '_')}",
             kind=SpanKind.CLIENT,
             attributes={
-                ### MODIFICATION ###
-                # Added standardized and custom attributes for rich, evaluatable traces.
                 "openinference.span.kind": OIKind.LLM.value,
                 "gen_ai.system": "openai",
                 "gen_ai.request.model": "gpt-4",
@@ -352,9 +358,14 @@ YOUR INSTRUCTION: Given all this information, now write specific suggestions for
                 "agento.user_goal": original_goal,
                 "agento.draft_content": draft,
                 "agento.plan_item": current_plan_item_content,
-                ### END MODIFICATION ###
             },
         ) as span:
+            if offline_mode:
+                revision_content = f"[offline critique] Improve clarity and alignment to goal '{original_goal}' for {step}."
+                revision_requests[step] = revision_content
+                set_ai_response_attribute(span, revision_content)
+                span.set_status(Status(StatusCode.OK))
+                continue
             try:
                 response = openai_client.chat.completions.create(
                     model="gpt-4",
@@ -371,7 +382,6 @@ YOUR INSTRUCTION: Given all this information, now write specific suggestions for
                     print(f"Revision request for step '{step}':\n{revision_content}\n")
                     flush()
 
-                # Introduce a delay to respect rate limits
                 time.sleep(delay_in_seconds)
 
             except Exception as e:
@@ -379,6 +389,8 @@ YOUR INSTRUCTION: Given all this information, now write specific suggestions for
                 span.set_status(Status(StatusCode.ERROR, str(e)))
                 print(f"Error calling OpenAI API for step '{step}': {e}")
                 flush()
+                revision_content = f"[fallback critique after error] Focus on alignment to goal '{original_goal}' and completeness."
+                revision_requests[step] = revision_content
 
     return revision_requests
 
@@ -527,7 +539,8 @@ def write_trace_context():
 #  Main execution
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
-    with tee_output():
+    tee_ctx = tee_output() if not OFFLINE_MODE else contextlib.nullcontext()
+    with tee_ctx:
         # --- Context Propagation: Read parent context if available ---
         parent_context = read_trace_context()
         with tracer.start_as_current_span(
@@ -598,3 +611,4 @@ if __name__ == "__main__":
             write_trace_context()
 
         trace.get_tracer_provider().force_flush()
+        os._exit(0)
