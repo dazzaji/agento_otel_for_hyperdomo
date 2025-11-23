@@ -1,0 +1,43 @@
+# Python cache / artifacts
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Environment / secrets
+.env
+.env.*
+*.env
+
+# Logs
+logs/
+*.log
+
+# Workspace artifacts - exclude outputs but keep inputs and tools
+workspace/outputs/
+workspace/*.md
+!workspace/inputs/
+!workspace/inputs/**
+!workspace/tools/
+!workspace/tools/**
+
+# macOS
+.DS_Store
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Misc
+*.egg-info/
+.dist/
+build/
+dist/
