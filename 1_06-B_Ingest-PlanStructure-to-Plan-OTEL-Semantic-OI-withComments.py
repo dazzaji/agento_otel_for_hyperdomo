@@ -47,9 +47,10 @@ from otel_file_exporter import FileSpanExporter
 
 MODULE_NAME = Path(__file__).stem
 TS_STAMP = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-FILE_EXPORT_PATH = Path("data") / f"{MODULE_NAME}_otel_{TS_STAMP}.ndjson"
+BASE_DIR = Path("data") / "for-lake-merritt"
+BASE_DIR.mkdir(parents=True, exist_ok=True)
+FILE_EXPORT_PATH = BASE_DIR / f"{MODULE_NAME}_otel_{TS_STAMP}.ndjson"
 OFFLINE_MODE = os.getenv("AGENTO_OFFLINE", "false").lower() == "true"
-Path("data").mkdir(exist_ok=True)
 resource = Resource.create(
     {
         "service.name": "agento",
@@ -192,8 +193,13 @@ def load_plan_structure(filename: str = "plan_structure.json") -> Optional[Dict]
     Loads and validates the initial plan structure from a JSON file using the ProjectPlan model.
     """
     try:
-        print(f"Loading plan structure from {filename}...")
-        with open(filename, "r") as f:
+        candidate_paths = [Path(filename), BASE_DIR / filename]
+        path_to_use = next((p for p in candidate_paths if p.exists()), None)
+        if not path_to_use:
+            print(f"Error: Could not find {filename}")
+            return None
+        print(f"Loading plan structure from {path_to_use}...")
+        with open(path_to_use, "r") as f:
             raw_plan = json.load(f)
         # Validate the plan structure using ProjectPlan model
         try:
@@ -485,13 +491,13 @@ def save_plan_outputs(plan: ProjectPlan):
     try:
         plan_dict = plan.model_dump()  # Convert to dictionary using Pydantic
         json_content = json.dumps(plan_dict, indent=2)  # Serialize the dictionary
-        save_file(json_content, json_filename)
-        save_file(json_content, json_filename_with_date)
+        save_file(json_content, BASE_DIR / json_filename)
+        save_file(json_content, BASE_DIR / json_filename_with_date)
     except ValidationError as e:
         logging.error(f"The generated plan does not conform to the schema: {e}")
 
     # Save Markdown file
-    md_filename = f"{notebook_name}-{current_date}-InitialPlan.md"
+    md_filename = BASE_DIR / f"{notebook_name}-{current_date}-InitialPlan.md"
     md_content = convert_to_markdown(plan)
     save_file(md_content, md_filename)
 
