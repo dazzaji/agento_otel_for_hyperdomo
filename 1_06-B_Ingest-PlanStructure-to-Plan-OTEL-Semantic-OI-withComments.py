@@ -50,7 +50,6 @@ TS_STAMP = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 BASE_DIR = Path("data") / "for-lake-merritt"
 BASE_DIR.mkdir(parents=True, exist_ok=True)
 FILE_EXPORT_PATH = BASE_DIR / f"{MODULE_NAME}_otel_{TS_STAMP}.ndjson"
-OFFLINE_MODE = os.getenv("AGENTO_OFFLINE", "false").lower() == "true"
 resource = Resource.create(
     {
         "service.name": "agento",
@@ -61,16 +60,15 @@ resource = Resource.create(
     }
 )
 provider = TracerProvider(resource=resource)
-if not OFFLINE_MODE:
-    provider.add_span_processor(
-        BatchSpanProcessor(
-            OTLPSpanExporter(
-                endpoint=os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4317"),
-                insecure=True,
-            ),
-            max_export_batch_size=512,
-        )
+provider.add_span_processor(
+    BatchSpanProcessor(
+        OTLPSpanExporter(
+            endpoint=os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4317"),
+            insecure=True,
+        ),
+        max_export_batch_size=512,
     )
+)
 provider.add_span_processor(SimpleSpanProcessor(FileSpanExporter(str(FILE_EXPORT_PATH))))
 trace.set_tracer_provider(provider)
 tracer = trace.get_tracer(__name__)
@@ -108,7 +106,7 @@ def tee_output(filename=None):
         # Create timestamp
         timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
         # Combine for filename
-        filename = f"{script_name}_{timestamp}_output.log"
+        filename = BASE_DIR / f"{script_name}_{timestamp}_output.log"
     try:
         # Open the tee process - using universal_newlines for text mode
         process = subprocess.Popen(
@@ -224,7 +222,6 @@ def load_plan_structure(filename: str = "plan_structure.json") -> Optional[Dict]
 #  Function to develop drafts (using GPT-4)
 # ---------------------------------------------------------------------------
 def develop_drafts(plan: Optional[Dict], goal: str) -> Dict[str, str]:
-    offline_mode = os.getenv("AGENTO_OFFLINE", "false").lower() == "true"
     """
     For each step in the plan, uses GPT-4 (OpenAI) to generate a full draft deliverable.
     Returns a dictionary mapping step names to draft content.
@@ -272,12 +269,6 @@ def develop_drafts(plan: Optional[Dict], goal: str) -> Dict[str, str]:
                     "agento.user_goal": goal,
                 },
             ) as span:
-                if offline_mode:
-                    draft_content = f"[offline draft] {step}: aligned to goal '{goal}' with criteria '{criteria}'."
-                    drafts[step] = draft_content
-                    set_ai_response_attribute(span, draft_content)
-                    span.set_status(Status(StatusCode.OK))
-                    continue
                 try:
                     response = openai_client.chat.completions.create(
                         model="gpt-4",
@@ -301,8 +292,6 @@ def develop_drafts(plan: Optional[Dict], goal: str) -> Dict[str, str]:
                     span.set_status(Status(StatusCode.ERROR, str(e)))
                     logging.error(f"Error calling OpenAI API for step '{step}': {e}")
                     flush()
-                    draft_content = f"[fallback draft after error] {step}: criteria='{criteria}' goal='{goal}'."
-                    drafts[step] = draft_content
     else:
         logging.error("'Detailed_Outline' or 'Evaluation_Criteria' missing in the plan. Cannot generate drafts.")
         flush()
@@ -312,7 +301,6 @@ def develop_drafts(plan: Optional[Dict], goal: str) -> Dict[str, str]:
 #  Function to generate revision requests
 # ---------------------------------------------------------------------------
 def generate_revision_requests(drafts, plan, original_goal):
-    offline_mode = os.getenv("AGENTO_OFFLINE", "false").lower() == "true"
     """
     For each draft, uses GPT-4 to generate revision requests.
     Returns a dictionary mapping step names to revision request content.
@@ -366,12 +354,6 @@ YOUR INSTRUCTION: Given all this information, now write specific suggestions for
                 "agento.plan_item": current_plan_item_content,
             },
         ) as span:
-            if offline_mode:
-                revision_content = f"[offline critique] Improve clarity and alignment to goal '{original_goal}' for {step}."
-                revision_requests[step] = revision_content
-                set_ai_response_attribute(span, revision_content)
-                span.set_status(Status(StatusCode.OK))
-                continue
             try:
                 response = openai_client.chat.completions.create(
                     model="gpt-4",
@@ -395,8 +377,6 @@ YOUR INSTRUCTION: Given all this information, now write specific suggestions for
                 span.set_status(Status(StatusCode.ERROR, str(e)))
                 print(f"Error calling OpenAI API for step '{step}': {e}")
                 flush()
-                revision_content = f"[fallback critique after error] Focus on alignment to goal '{original_goal}' and completeness."
-                revision_requests[step] = revision_content
 
     return revision_requests
 
@@ -506,7 +486,7 @@ def save_plan_outputs(plan: ProjectPlan):
 # ---------------------------------------------------------------------------
 def save_plan_csv(goal: str, plan: Dict) -> None:
     ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    csv_path = Path("data") / f"{MODULE_NAME}_plan_{ts}.csv"
+    csv_path = BASE_DIR / f"{MODULE_NAME}_plan_{ts}.csv"
     csv_path.parent.mkdir(parents=True, exist_ok=True)
     with csv_path.open("w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
@@ -522,8 +502,8 @@ def read_trace_context():
     Reads the trace context from a file if it exists, for OTEL context propagation.
     """
     try:
-        if Path("trace.context").exists():
-            with open("trace.context", "r", encoding="utf-8") as f:
+        if (BASE_DIR / "trace.context").exists():
+            with open(BASE_DIR / "trace.context", "r", encoding="utf-8") as f:
                 carrier = json.load(f)
             return propagate.extract(carrier)
     except Exception as e:
@@ -537,7 +517,7 @@ def write_trace_context():
     try:
         carrier = {}
         propagate.inject(carrier)
-        Path("trace.context").write_text(json.dumps(carrier))
+        (BASE_DIR / "trace.context").write_text(json.dumps(carrier))
     except Exception as e:
         logging.warning(f"Could not write trace.context: {e}")
 
@@ -545,8 +525,7 @@ def write_trace_context():
 #  Main execution
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
-    tee_ctx = tee_output() if not OFFLINE_MODE else contextlib.nullcontext()
-    with tee_ctx:
+    with tee_output():
         # --- Context Propagation: Read parent context if available ---
         parent_context = read_trace_context()
         with tracer.start_as_current_span(

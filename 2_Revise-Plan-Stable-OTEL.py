@@ -38,7 +38,7 @@ def tee_output(filename=None):
     if filename is None:
         script_name = os.path.splitext(os.path.basename(__file__))[0]
         timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        filename = f"{script_name}_{timestamp}_output.log"
+        filename = BASE_DIR / f"{script_name}_{timestamp}_output.log"
     try:
         process = subprocess.Popen(
             ['tee', filename],
@@ -80,20 +80,19 @@ def _format_revision_history(history: List[Dict[str, str]]) -> str:
             formatted.append(f"Instruction {i//2 + 1}:\n```\n{msg['content']}\n```")
     return "\n\n".join(formatted)
 
-logging.basicConfig(level=logging.INFO, filename='script.log', filemode='w') # Changed level to INFO for production
+### MODIFICATION START ###
+# Added OTEL tracer setup and centralized paths
+MODULE_NAME = Path(__file__).stem
+TS_STAMP = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+BASE_DIR = Path("data") / "for-lake-merritt"
+BASE_DIR.mkdir(parents=True, exist_ok=True)
+FILE_EXPORT_PATH = BASE_DIR / f"{MODULE_NAME}_otel_{TS_STAMP}.ndjson"
+logging.basicConfig(level=logging.INFO, filename=str(BASE_DIR / 'script.log'), filemode='w') # Changed level to INFO for production
 logger = logging.getLogger(__name__)
 
 load_dotenv()
 anthropic_client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
-
-### MODIFICATION START ###
-# Added OTEL tracer setup
-MODULE_NAME = Path(__file__).stem
-TS_STAMP = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-FILE_EXPORT_PATH = Path("data") / f"{MODULE_NAME}_otel_{TS_STAMP}.ndjson"
-OFFLINE_MODE = os.getenv("AGENTO_OFFLINE", "false").lower() == "true"
-Path("data").mkdir(exist_ok=True)
 resource = Resource.create({
     "service.name": "agento",
     "service.version": "1.0.0",
@@ -102,11 +101,10 @@ resource = Resource.create({
     "service.instance.id": str(uuid.uuid4()),
 })
 provider = TracerProvider(resource=resource)
-if not OFFLINE_MODE:
-    provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter(
-        endpoint=os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4317"),
-        insecure=True,
-    )))
+provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter(
+    endpoint=os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4317"),
+    insecure=True,
+)))
 provider.add_span_processor(SimpleSpanProcessor(FileSpanExporter(str(FILE_EXPORT_PATH))))
 trace.set_tracer_provider(provider)
 tracer = trace.get_tracer(__name__)
@@ -124,15 +122,21 @@ signal.signal(signal.SIGTERM, exit_gracefully)
 ### MODIFICATION END ###
 
 MAX_ITERATIONS = 3
-CLAUDE_MODEL = "claude-3-5-sonnet-20240620" # Updated model
-GEMINI_MODEL = "gemini-1.5-pro"
+CLAUDE_MODEL = "claude-sonnet-4-5" # Updated model
+GEMINI_MODEL = "gemini-2.5-flash"  # Gemini models (API codes & approx $/M tokens, input/output up to 200k unless noted): gemini-3-pro-preview $2.00/$12.00; gemini-3-pro-image-preview $2.00/$12.00; gemini-2.5-pro $1.25/$10.00; gemini-2.5-flash $0.15/$3.50; gemini-2.5-flash-preview-09-2025 $0.15/$3.50; gemini-2.5-flash-image $0.15/$3.50; gemini-2.5-flash-lite $0.10/$0.40; gemini-2.5-flash-lite-preview-09-2025 $0.10/$0.40; gemini-2.0-flash $0.10/$0.40; gemini-2.0-flash-lite $0.10/$0.20; over-200k pricing doubles input/output as listed in source table.
 
 def load_revised_plan(filename: str) -> Optional[Dict]:
     try:
-        print(f"Attempting to open {filename}...")
-        with open(filename, "r") as f:
+        candidate_paths = [Path(filename), BASE_DIR / filename]
+        path_to_use = next((p for p in candidate_paths if p.exists()), None)
+        if not path_to_use:
+            print(f"Error: Could not find {filename}")
+            logger.error(f"Error loading revised project plan: File not found")
+            return None
+        print(f"Attempting to open {path_to_use}...")
+        with open(path_to_use, "r") as f:
             data = json.load(f)
-            print(f"Successfully loaded {filename}")
+            print(f"Successfully loaded {path_to_use}")
             return data
     except FileNotFoundError:
         print(f"Error: Could not find {filename}")
@@ -337,17 +341,12 @@ def revise_step_with_llms(plan: Dict, step: Dict, revision_request: str, anthrop
         return plan, context
 
 def further_revise_plan(plan: Dict, anthropic_client: anthropic.Anthropic, gemini_model: genai.GenerativeModel, verbose: bool = True) -> Tuple[Optional[Dict], Dict[str, RevisionContext]]:
-    offline_mode = os.getenv("AGENTO_OFFLINE", "false").lower() == "true"
     try:
         print("Initializing revision process...")
         revision_contexts = {}
         steps_to_revise = [step for step in plan["Detailed_Outline"] if step["name"] in plan.get("revision_requests", {})]
         total_steps = len(steps_to_revise)
         print(f"Found {total_steps} steps to revise")
-
-        if offline_mode:
-            print("Offline mode enabled: skipping network LLM revisions; copying plan forward.")
-            return plan, revision_contexts
 
         for i, step in enumerate(steps_to_revise):
             step_name = step["name"]
@@ -390,26 +389,30 @@ def convert_to_markdown(plan: Dict) -> str:
     return md_content
 
 def save_revised_plan(plan: Dict, file_prefix: str) -> None:
-    json_filename = "RevisedPlan.json"
-    json_filename_with_date = f"{file_prefix}.json"
+    json_filename = BASE_DIR / "RevisedPlan.json"
+    json_filename_with_date = BASE_DIR / f"{file_prefix}.json"
     with open(json_filename, "w") as f:
         json.dump(plan, f, indent=4)
     print(f"Revised plan saved as '{json_filename}'")
     with open(json_filename_with_date, "w") as f:
         json.dump(plan, f, indent=4)
     print(f"Revised plan saved as '{json_filename_with_date}'")
-    md_filename = f"{file_prefix}-RevisedPlan.md"
+    md_filename = BASE_DIR / f"{file_prefix}-RevisedPlan.md"
     md_content = convert_to_markdown(plan)
     with open(md_filename, "w") as f:
         f.write(md_content)
     print(f"Revised plan saved as '{md_filename}'")
+    # Also save an always-current markdown for quick reference
+    md_latest = BASE_DIR / "RevisedPlan.md"
+    with open(md_latest, "w") as f:
+        f.write(md_content)
 
 # ---------------------------------------------------------------------------
 #  Lake Merritt CSV Helper
 # ---------------------------------------------------------------------------
 def save_plan_csv(goal: str, plan: Dict) -> None:
     ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    csv_path = Path("data") / f"{MODULE_NAME}_plan_{ts}.csv"
+    csv_path = BASE_DIR / f"{MODULE_NAME}_plan_{ts}.csv"
     csv_path.parent.mkdir(parents=True, exist_ok=True)
     with csv_path.open("w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
@@ -421,8 +424,8 @@ def save_plan_csv(goal: str, plan: Dict) -> None:
 # Added context propagation helpers, necessary for multi-module traces
 def read_trace_context():
     try:
-        if Path("trace.context").exists():
-            with open("trace.context", "r", encoding="utf-8") as f:
+        if (BASE_DIR / "trace.context").exists():
+            with open(BASE_DIR / "trace.context", "r", encoding="utf-8") as f:
                 return propagate.extract(json.load(f))
     except Exception as e:
         logging.warning(f"Could not read trace.context: {e}")
@@ -432,14 +435,13 @@ def write_trace_context():
     try:
         carrier = {}
         propagate.inject(carrier)
-        Path("trace.context").write_text(json.dumps(carrier))
+        (BASE_DIR / "trace.context").write_text(json.dumps(carrier))
     except Exception as e:
         logging.warning(f"Could not write trace.context: {e}")
 ### MODIFICATION END ###
 
 if __name__ == "__main__":
-    tee_ctx = tee_output() if not OFFLINE_MODE else contextlib.nullcontext()
-    with tee_ctx:
+    with tee_output():
         ### MODIFICATION START ###
         parent_context = read_trace_context()
         with tracer.start_as_current_span(

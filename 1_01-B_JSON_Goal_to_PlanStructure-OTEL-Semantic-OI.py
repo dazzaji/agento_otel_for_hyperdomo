@@ -160,7 +160,6 @@ TS_STAMP = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 BASE_DIR = Path("data") / "for-lake-merritt"
 BASE_DIR.mkdir(parents=True, exist_ok=True)
 FILE_EXPORT_PATH = BASE_DIR / f"{MODULE_NAME}_otel_{TS_STAMP}.ndjson"
-OFFLINE_MODE = os.getenv("AGENTO_OFFLINE", "false").lower() == "true"
 
 resource = Resource.create(
     {
@@ -172,16 +171,15 @@ resource = Resource.create(
     }
 )
 provider = TracerProvider(resource=resource)
-if not OFFLINE_MODE:
-    provider.add_span_processor(
-        BatchSpanProcessor(
-            OTLPSpanExporter(
-                endpoint=os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4317"),
-                insecure=True,
-            ),
-            max_export_batch_size=512,
-        )
+provider.add_span_processor(
+    BatchSpanProcessor(
+        OTLPSpanExporter(
+            endpoint=os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4317"),
+            insecure=True,
+        ),
+        max_export_batch_size=512,
     )
+)
 provider.add_span_processor(SimpleSpanProcessor(FileSpanExporter(str(FILE_EXPORT_PATH))))
 trace.set_tracer_provider(provider)
 tracer = trace.get_tracer(__name__)
@@ -209,7 +207,7 @@ def flush() -> None:
 def tee_output(filename: str | None = None):
     if filename is None:
         ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        filename = f"{MODULE_NAME}_{ts}_output.log"
+        filename = BASE_DIR / f"{MODULE_NAME}_{ts}_output.log"
     proc = subprocess.Popen(
         ["tee", filename],
         stdin=subprocess.PIPE,
@@ -262,23 +260,6 @@ def set_gemini_tokens(span, response):
 #  Business Logic
 # ---------------------------------------------------------------------------
 def generate_plan_structure(goal: str) -> Optional[Dict]:
-    offline_mode = os.getenv("AGENTO_OFFLINE", "false").lower() == "true"
-
-    def _offline_plan():
-        return {
-            "Title": "Offline Plan Structure (stub)",
-            "Overall_Summary": "Offline fallback plan generated locally without LLM.",
-            "Original_Goal": goal,
-            "Detailed_Outline": [
-                {"name": "Step 1", "content": "Outline the key tasks for the goal."},
-                {"name": "Step 2", "content": "Draft deliverables and success measures."},
-            ],
-            "Evaluation_Criteria": {
-                "Step 1": "Tasks are relevant and actionable.",
-                "Step 2": "Deliverables align to the goal and are testable.",
-            },
-            "Success_Measures": ["Clear steps listed", "Deliverables align with goal"],
-        }
     prompt = f"""
 You are a top consultant called in to deliver a final version of what the user needs correctly, completely, and at high quality.
 Create a comprehensive set of project deliverables, identifying each deliverable step by step, in JSON format to achieve the following goal: {goal}
@@ -307,9 +288,6 @@ Ensure that:
 
     print("\nGenerating plan structure...", flush=True)
 
-    if offline_mode:
-        return _offline_plan()
-
     model = genai.GenerativeModel(
         "gemini-2.5-pro",
         generation_config={"temperature": 0.1, "top_p": 1, "max_output_tokens": 8192},
@@ -330,7 +308,7 @@ Ensure that:
         attributes={
             "openinference.span.kind": OIKind.LLM.value,
             "gen_ai.system": "gemini",
-            "gen_ai.request.model": "gemini-1.5-pro",
+            "gen_ai.request.model": "gemini-2.5-pro",
             "gen_ai.request.temperature": 0.1,
             "gen_ai.operation.name": "chat",
             "agento.step_type": "plan",
@@ -345,8 +323,7 @@ Ensure that:
         except Exception as e:
             span.record_exception(e)
             span.set_status(Status(StatusCode.ERROR, str(e)))
-            logging.warning("Gemini call failed, using offline fallback: %s", e)
-            return _offline_plan()
+            raise
 
     json_start = response.text.find("{")
     json_end = response.text.rfind("}") + 1
@@ -355,7 +332,7 @@ Ensure that:
         PlanStructure(**plan_dict)
     except (json.JSONDecodeError, ValidationError) as err:
         logging.error("Plan generation invalid: %s", err)
-        return _offline_plan()
+        return None
 
     return plan_dict
 
