@@ -157,9 +157,13 @@ from otel_file_exporter import FileSpanExporter
 
 MODULE_NAME = Path(__file__).stem
 TS_STAMP = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-BASE_DIR = Path("data") / "for-lake-merritt"
-BASE_DIR.mkdir(parents=True, exist_ok=True)
-FILE_EXPORT_PATH = BASE_DIR / f"{MODULE_NAME}_otel_{TS_STAMP}.ndjson"
+DATA_DIR = Path("data")
+LM_DIR = DATA_DIR / "for-lake-merritt"
+LOG_DIR = Path("logs")
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+LM_DIR.mkdir(parents=True, exist_ok=True)
+LOG_DIR.mkdir(parents=True, exist_ok=True)
+FILE_EXPORT_PATH = DATA_DIR / f"{MODULE_NAME}_otel_{TS_STAMP}.ndjson"
 
 resource = Resource.create(
     {
@@ -207,7 +211,7 @@ def flush() -> None:
 def tee_output(filename: str | None = None):
     if filename is None:
         ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        filename = BASE_DIR / f"{MODULE_NAME}_{ts}_output.log"
+        filename = LOG_DIR / f"{MODULE_NAME}_{ts}_output.log"
     proc = subprocess.Popen(
         ["tee", filename],
         stdin=subprocess.PIPE,
@@ -342,7 +346,7 @@ Ensure that:
 def save_plan_structure(plan: Dict, base_filename: str = "plan_structure") -> bool:
     try:
         timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        for filename in [BASE_DIR / f"{base_filename}.json", BASE_DIR / f"{base_filename}_{timestamp}.json"]:
+        for filename in [DATA_DIR / f"{base_filename}.json", DATA_DIR / f"{base_filename}_{timestamp}.json"]:
             with open(filename, "w", encoding="utf-8") as f:
                 json.dump(plan, f, indent=2, ensure_ascii=False)
             logging.info(f"Saved plan structure to {filename}")
@@ -356,7 +360,7 @@ def save_plan_structure(plan: Dict, base_filename: str = "plan_structure") -> bo
 # ---------------------------------------------------------------------------
 def save_plan_markdown(plan: Dict) -> None:
     ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    md_path = BASE_DIR / f"plan_outline_{ts}.md"
+    md_path = LM_DIR / f"plan_outline_{ts}.md"
     lines = [
         f"# {plan.get('Title', 'Plan')}",
         "",
@@ -380,7 +384,7 @@ def save_plan_markdown(plan: Dict) -> None:
 # ---------------------------------------------------------------------------
 def save_plan_csv(goal: str, plan: Dict) -> None:
     ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    csv_path = BASE_DIR / f"{MODULE_NAME}_plan_{ts}.csv"
+    csv_path = DATA_DIR / f"{MODULE_NAME}_plan_{ts}.csv"
     csv_path.parent.mkdir(parents=True, exist_ok=True)
     with csv_path.open("w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
@@ -392,7 +396,12 @@ def save_plan_csv(goal: str, plan: Dict) -> None:
 #  Main Execution
 # ---------------------------------------------------------------------------
 def main() -> None:
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+    logging.basicConfig(
+        level=logging.DEBUG,
+        format="%(asctime)s - %(levelname)s - %(message)s",
+        filename=LOG_DIR / f"{MODULE_NAME}_{TS_STAMP}.log",
+        filemode="w",
+    )
 
     with tee_output():
         with tracer.start_as_current_span(
@@ -444,7 +453,7 @@ def main() -> None:
 
             carrier = {}
             propagate.inject(carrier)
-            (BASE_DIR / "trace.context").write_text(json.dumps(carrier))
+            (DATA_DIR / "trace.context").write_text(json.dumps(carrier))
 
     trace.get_tracer_provider().force_flush()
 

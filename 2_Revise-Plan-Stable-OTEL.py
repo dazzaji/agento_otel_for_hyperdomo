@@ -38,7 +38,7 @@ def tee_output(filename=None):
     if filename is None:
         script_name = os.path.splitext(os.path.basename(__file__))[0]
         timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        filename = BASE_DIR / f"{script_name}_{timestamp}_output.log"
+        filename = DATA_DIR / f"{script_name}_{timestamp}_output.log"
     try:
         process = subprocess.Popen(
             ['tee', filename],
@@ -84,10 +84,19 @@ def _format_revision_history(history: List[Dict[str, str]]) -> str:
 # Added OTEL tracer setup and centralized paths
 MODULE_NAME = Path(__file__).stem
 TS_STAMP = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-BASE_DIR = Path("data") / "for-lake-merritt"
-BASE_DIR.mkdir(parents=True, exist_ok=True)
-FILE_EXPORT_PATH = BASE_DIR / f"{MODULE_NAME}_otel_{TS_STAMP}.ndjson"
-logging.basicConfig(level=logging.INFO, filename=str(BASE_DIR / 'script.log'), filemode='w') # Changed level to INFO for production
+DATA_DIR = Path("data")
+LM_DIR = DATA_DIR / "for-lake-merritt"
+LOG_DIR = Path("logs")
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+LM_DIR.mkdir(parents=True, exist_ok=True)
+LOG_DIR.mkdir(parents=True, exist_ok=True)
+FILE_EXPORT_PATH = DATA_DIR / f"{MODULE_NAME}_otel_{TS_STAMP}.ndjson"
+logging.basicConfig(
+    level=logging.DEBUG,
+    filename=str(LOG_DIR / f"{MODULE_NAME}_{TS_STAMP}.log"),
+    filemode='w',
+    format="%(asctime)s - %(levelname)s - %(message)s",
+) # Verbose logging for troubleshooting
 logger = logging.getLogger(__name__)
 
 load_dotenv()
@@ -127,7 +136,7 @@ GEMINI_MODEL = "gemini-2.5-flash"  # Gemini models (API codes & approx $/M token
 
 def load_revised_plan(filename: str) -> Optional[Dict]:
     try:
-        candidate_paths = [Path(filename), BASE_DIR / filename]
+        candidate_paths = [Path(filename), DATA_DIR / filename]
         path_to_use = next((p for p in candidate_paths if p.exists()), None)
         if not path_to_use:
             print(f"Error: Could not find {filename}")
@@ -389,21 +398,21 @@ def convert_to_markdown(plan: Dict) -> str:
     return md_content
 
 def save_revised_plan(plan: Dict, file_prefix: str) -> None:
-    json_filename = BASE_DIR / "RevisedPlan.json"
-    json_filename_with_date = BASE_DIR / f"{file_prefix}.json"
+    json_filename = DATA_DIR / "RevisedPlan.json"
+    json_filename_with_date = DATA_DIR / f"{file_prefix}.json"
     with open(json_filename, "w") as f:
         json.dump(plan, f, indent=4)
     print(f"Revised plan saved as '{json_filename}'")
     with open(json_filename_with_date, "w") as f:
         json.dump(plan, f, indent=4)
     print(f"Revised plan saved as '{json_filename_with_date}'")
-    md_filename = BASE_DIR / f"{file_prefix}-RevisedPlan.md"
+    md_filename = LM_DIR / f"{file_prefix}-RevisedPlan.md"
     md_content = convert_to_markdown(plan)
     with open(md_filename, "w") as f:
         f.write(md_content)
     print(f"Revised plan saved as '{md_filename}'")
     # Also save an always-current markdown for quick reference
-    md_latest = BASE_DIR / "RevisedPlan.md"
+    md_latest = LM_DIR / "RevisedPlan.md"
     with open(md_latest, "w") as f:
         f.write(md_content)
 
@@ -412,7 +421,7 @@ def save_revised_plan(plan: Dict, file_prefix: str) -> None:
 # ---------------------------------------------------------------------------
 def save_plan_csv(goal: str, plan: Dict) -> None:
     ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    csv_path = BASE_DIR / f"{MODULE_NAME}_plan_{ts}.csv"
+    csv_path = DATA_DIR / f"{MODULE_NAME}_plan_{ts}.csv"
     csv_path.parent.mkdir(parents=True, exist_ok=True)
     with csv_path.open("w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
@@ -424,8 +433,8 @@ def save_plan_csv(goal: str, plan: Dict) -> None:
 # Added context propagation helpers, necessary for multi-module traces
 def read_trace_context():
     try:
-        if (BASE_DIR / "trace.context").exists():
-            with open(BASE_DIR / "trace.context", "r", encoding="utf-8") as f:
+        if (DATA_DIR / "trace.context").exists():
+            with open(DATA_DIR / "trace.context", "r", encoding="utf-8") as f:
                 return propagate.extract(json.load(f))
     except Exception as e:
         logging.warning(f"Could not read trace.context: {e}")
@@ -435,7 +444,7 @@ def write_trace_context():
     try:
         carrier = {}
         propagate.inject(carrier)
-        (BASE_DIR / "trace.context").write_text(json.dumps(carrier))
+        (DATA_DIR / "trace.context").write_text(json.dumps(carrier))
     except Exception as e:
         logging.warning(f"Could not write trace.context: {e}")
 ### MODIFICATION END ###
@@ -454,8 +463,8 @@ if __name__ == "__main__":
             print("Script starting...")
             current_datetime = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
             notebook_name = os.path.splitext(os.path.basename(__file__))[0]
-            print(f"Looking for project_plan.json...")
-            revised_plan = load_revised_plan("project_plan.json")
+            print(f"Looking for project_plan_with_revisions.json...")
+            revised_plan = load_revised_plan("project_plan_with_revisions.json")
             
             if revised_plan:
                 ### MODIFICATION START ###

@@ -47,9 +47,13 @@ from otel_file_exporter import FileSpanExporter
 
 MODULE_NAME = Path(__file__).stem
 TS_STAMP = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-BASE_DIR = Path("data") / "for-lake-merritt"
-BASE_DIR.mkdir(parents=True, exist_ok=True)
-FILE_EXPORT_PATH = BASE_DIR / f"{MODULE_NAME}_otel_{TS_STAMP}.ndjson"
+DATA_DIR = Path("data")
+LM_DIR = DATA_DIR / "for-lake-merritt"
+LOG_DIR = Path("logs")
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+LM_DIR.mkdir(parents=True, exist_ok=True)
+LOG_DIR.mkdir(parents=True, exist_ok=True)
+FILE_EXPORT_PATH = DATA_DIR / f"{MODULE_NAME}_otel_{TS_STAMP}.ndjson"
 resource = Resource.create(
     {
         "service.name": "agento",
@@ -88,7 +92,12 @@ signal.signal(signal.SIGTERM, exit_gracefully)
 # ---------------------------------------------------------------------------
 #  Logging Setup
 # ---------------------------------------------------------------------------
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    filename=LOG_DIR / f"{MODULE_NAME}_{TS_STAMP}.log",
+    filemode="w",
+)
 
 # ---------------------------------------------------------------------------
 #  Console helpers (unchanged)
@@ -106,7 +115,7 @@ def tee_output(filename=None):
         # Create timestamp
         timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
         # Combine for filename
-        filename = BASE_DIR / f"{script_name}_{timestamp}_output.log"
+        filename = DATA_DIR / f"{script_name}_{timestamp}_output.log"
     try:
         # Open the tee process - using universal_newlines for text mode
         process = subprocess.Popen(
@@ -191,7 +200,7 @@ def load_plan_structure(filename: str = "plan_structure.json") -> Optional[Dict]
     Loads and validates the initial plan structure from a JSON file using the ProjectPlan model.
     """
     try:
-        candidate_paths = [Path(filename), BASE_DIR / filename]
+        candidate_paths = [Path(filename), DATA_DIR / filename]
         path_to_use = next((p for p in candidate_paths if p.exists()), None)
         if not path_to_use:
             print(f"Error: Could not find {filename}")
@@ -464,20 +473,20 @@ def save_plan_outputs(plan: ProjectPlan):
     notebook_name = os.path.splitext(os.path.basename(__file__))[0]
 
     # Save JSON files
-    json_filename = "project_plan.json"
-    json_filename_with_date = f"project_plan_{current_datetime}.json"
+    json_filename = DATA_DIR / "project_plan.json"
+    json_filename_with_date = DATA_DIR / f"project_plan_{current_datetime}.json"
 
     # Validate and serialize the ProjectPlan using Pydantic
     try:
         plan_dict = plan.model_dump()  # Convert to dictionary using Pydantic
         json_content = json.dumps(plan_dict, indent=2)  # Serialize the dictionary
-        save_file(json_content, BASE_DIR / json_filename)
-        save_file(json_content, BASE_DIR / json_filename_with_date)
+        save_file(json_content, json_filename)
+        save_file(json_content, json_filename_with_date)
     except ValidationError as e:
         logging.error(f"The generated plan does not conform to the schema: {e}")
 
     # Save Markdown file
-    md_filename = BASE_DIR / f"{notebook_name}-{current_date}-InitialPlan.md"
+    md_filename = LM_DIR / f"{notebook_name}-{current_date}-InitialPlan.md"
     md_content = convert_to_markdown(plan)
     save_file(md_content, md_filename)
 
@@ -486,7 +495,7 @@ def save_plan_outputs(plan: ProjectPlan):
 # ---------------------------------------------------------------------------
 def save_plan_csv(goal: str, plan: Dict) -> None:
     ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    csv_path = BASE_DIR / f"{MODULE_NAME}_plan_{ts}.csv"
+    csv_path = DATA_DIR / f"{MODULE_NAME}_plan_{ts}.csv"
     csv_path.parent.mkdir(parents=True, exist_ok=True)
     with csv_path.open("w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
@@ -502,8 +511,8 @@ def read_trace_context():
     Reads the trace context from a file if it exists, for OTEL context propagation.
     """
     try:
-        if (BASE_DIR / "trace.context").exists():
-            with open(BASE_DIR / "trace.context", "r", encoding="utf-8") as f:
+        if (DATA_DIR / "trace.context").exists():
+            with open(DATA_DIR / "trace.context", "r", encoding="utf-8") as f:
                 carrier = json.load(f)
             return propagate.extract(carrier)
     except Exception as e:
@@ -517,7 +526,7 @@ def write_trace_context():
     try:
         carrier = {}
         propagate.inject(carrier)
-        (BASE_DIR / "trace.context").write_text(json.dumps(carrier))
+        (DATA_DIR / "trace.context").write_text(json.dumps(carrier))
     except Exception as e:
         logging.warning(f"Could not write trace.context: {e}")
 
@@ -552,16 +561,7 @@ if __name__ == "__main__":
             root_span.set_attribute("user_goal", original_goal)
 
             drafts = develop_drafts(plan, original_goal)
-
-            revision_requests = generate_revision_requests(drafts, plan, original_goal)
-
-            plan["revision_requests"] = revision_requests
-
-            # Print revision requests for verification
-            print("\nGenerated Revision Requests:")
-            for step, request in revision_requests.items():
-                print(f"\n{step}:\n{request}")
-            flush()
+            plan["revision_requests"] = {}
 
             final_plan = compile_final_plan(drafts, plan, original_goal)
 
@@ -585,9 +585,15 @@ if __name__ == "__main__":
 
             save_plan_outputs(final_plan)
             try:
-                save_plan_csv(original_goal, final_plan.model_dump())
+                # Save drafts JSON with distinct name for downstream module
+                drafts_json = DATA_DIR / f"project_plan_drafts_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.json"
+                drafts_json_latest = DATA_DIR / "project_plan_drafts.json"
+                data_dump = final_plan.model_dump()
+                drafts_json.write_text(json.dumps(data_dump, indent=2), encoding="utf-8")
+                drafts_json_latest.write_text(json.dumps(data_dump, indent=2), encoding="utf-8")
+                save_plan_csv(original_goal, data_dump)
             except Exception as csv_err:
-                logging.error("Failed to save Lake Merritt CSV: %s", csv_err)
+                logging.error("Failed to save Lake Merritt CSV/drafts: %s", csv_err)
 
             print(f"\nProject plan saved.")
             print("You can now run the next module to continue the iterative refinement process.")
